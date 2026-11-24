@@ -42,6 +42,7 @@ body{background:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(56,189,248,.18)
       <div class="flex items-center justify-between mb-1"><span class="text-[10px] text-gray-500">Address</span><span id="walletAddr" class="m text-xs text-gray-200">—</span></div>
       <div class="flex items-center justify-between"><span class="text-[10px] text-gray-500">$WAVEUNITS</span><span id="tokenBal" class="m text-sm font-bold text-sky-300">—</span></div>
     </div>
+    <p class="text-[9px] text-gray-500 mt-2 leading-relaxed">On mobile? Tap Connect — you'll be taken to Phantom to approve.</p>
   </div>
 
   <!-- AGENT CREATOR -->
@@ -77,6 +78,29 @@ body{background:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(56,189,248,.18)
     </div>
   </div>
 
+  <!-- MATCHMAKING -->
+  <div class="g p-4">
+    <p class="text-[10px] text-gray-500 uppercase tracking-wider font-semibold mb-2">4. Find Match</p>
+    <div id="matchIdle">
+      <button id="findMatchBtn" class="w-full py-3 rounded-xl font-bold text-sm bg-purple-500 text-white hover:bg-purple-400 transition">🔍 Find Opponent</button>
+      <p class="text-[9px] text-gray-500 mt-2 text-center">Your agent will be queued. When another agent joins, the match starts automatically.</p>
+    </div>
+    <div id="matchSearching" class="hidden">
+      <div class="flex items-center justify-center gap-3 py-4">
+        <div class="w-3 h-3 rounded-full bg-purple-500 animate-pulse"></div>
+        <span class="text-sm font-bold">Searching for opponent…</span>
+      </div>
+      <button id="cancelMatchBtn" class="w-full py-2 rounded-lg text-xs bg-white/5 border border-white/10 hover:bg-white/10 transition">Cancel</button>
+    </div>
+    <div id="matchInProgress" class="hidden">
+      <div class="flex items-center justify-between mb-2">
+        <span class="text-xs font-bold text-purple-400">⚔️ Match in progress</span>
+        <span id="matchOpponent" class="text-[10px] text-gray-400 m">vs —</span>
+      </div>
+      <p id="matchStatus" class="text-[10px] text-gray-500 text-center">Waiting for opponent's move…</p>
+    </div>
+  </div>
+
   <!-- BOARD -->
   <div class="flex justify-center">
     <div id="board"></div>
@@ -88,9 +112,9 @@ body{background:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(56,189,248,.18)
     <div class="g p-3 text-center"><p class="text-[9px] text-gray-500 uppercase mb-1">Status</p><p id="gameStatus" class="text-sm m font-bold text-green-400">READY</p></div>
   </div>
 
-  <!-- AGENT PLAY -->
+  <!-- AGENT PLAY (solo mode) -->
   <div class="g p-4">
-    <p class="text-[10px] text-gray-500 uppercase tracking-wider font-semibold mb-2">4. Agent Play</p>
+    <p class="text-[10px] text-gray-500 uppercase tracking-wider font-semibold mb-2">5. Solo Play</p>
     <div class="grid grid-cols-2 gap-2 mb-2">
       <button id="agentMoveBtn" class="py-3 rounded-xl font-bold text-xs bg-sky-500 text-black hover:bg-sky-400 transition">🤖 Agent Move</button>
       <button id="agentAutoBtn" class="py-3 rounded-xl font-bold text-xs bg-white/5 border border-white/10 hover:bg-white/10 transition">Auto: OFF</button>
@@ -116,11 +140,9 @@ body{background:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(56,189,248,.18)
 </div>
 <div id="toastRoot" class="fixed top-5 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 w-full max-w-sm px-4" style="pointer-events:none"></div>
 
-<!-- Load chess.js as ES module, expose to window -->
 <script type="module">
   import { Chess } from 'https://cdn.jsdelivr.net/npm/chess.js@1.4.0/+esm';
   window.Chess = Chess;
-  // Signal that Chess is ready
   window.dispatchEvent(new Event('chess-ready'));
 </script>
 
@@ -131,6 +153,7 @@ const CONFIG = {
   TOKEN_MINT: 'ACHESSxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
   RPC: 'https://api.mainnet-beta.solana.com',
   KES_PER_TOKEN: 10,
+  MATCH_POLL_MS: 2000,
 };
 
 function toast(msg,type='info'){
@@ -144,93 +167,82 @@ function toast(msg,type='info'){
 async function fbGet(p){try{const r=await fetch(`${CONFIG.FIREBASE_DB_URL}/${p}.json`);return r.ok?r.json():null}catch{return null}}
 async function fbSet(p,d){try{const r=await fetch(`${CONFIG.FIREBASE_DB_URL}/${p}.json`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});return r.ok?r.json():null}catch{return null}}
 async function fbPush(p,d){try{const r=await fetch(`${CONFIG.FIREBASE_DB_URL}/${p}.json`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});return r.ok?r.json():null}catch{return null}}
+async function fbDelete(p){try{await fetch(`${CONFIG.FIREBASE_DB_URL}/${p}.json`,{method:'DELETE'})}catch{}}
 
 let walletAddr=null,walletProvider=null,tokenBal=0,userEmail=null,userKey=null,localBalance=0;
 let agent={name:null,provider:null,apiKey:null,strategy:null,ready:false};
 let agentAutoTimer=null;
 
-// Board state (initialized once Chess is ready)
-let game = null;
-let selectedSquare = null;
-let orientation = 'white';
-let lastMoveSquares = [];
+let game=null;
+let selectedSquare=null;
+let orientation='white';
+let lastMoveSquares=[];
 
-const PIECES = {p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚',P:'♙',N:'♘',B:'♗',R:'♖',Q:'♕',K:'♔'};
-const boardEl = document.getElementById('board');
+// Matchmaking state
+let myPlayerId = 'p_' + Math.random().toString(36).slice(2, 10);
+let matchId = null;
+let matchPollTimer = null;
+let myColor = null;       // 'w' or 'b'
+let lastSeenMoveCount = 0;
+
+const PIECES={p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚',P:'♙',N:'♘',B:'♗',R:'♖',Q:'♕',K:'♔'};
+const boardEl=document.getElementById('board');
 
 function renderBoard(){
-  if (!game) return;
-  boardEl.innerHTML = '';
-  const ranks = orientation === 'white' ? [8,7,6,5,4,3,2,1] : [1,2,3,4,5,6,7,8];
-  const files = orientation === 'white' ? ['a','b','c','d','e','f','g','h'] : ['h','g','f','e','d','c','b','a'];
-
-  for (const rank of ranks) {
-    for (const file of files) {
-      const sq = file + rank;
-      const isLight = (files.indexOf(file) + ranks.indexOf(rank)) % 2 === 0;
-      const piece = game.get(sq);
-      const div = document.createElement('div');
-      div.className = 'sq ' + (isLight ? 'light' : 'dark');
-      div.dataset.square = sq;
-      if (piece) {
-        div.textContent = PIECES[piece.color === 'w' ? piece.type.toUpperCase() : piece.type];
-        div.style.color = piece.color === 'w' ? '#FFFFFF' : '#111111';
-        div.style.textShadow = piece.color === 'w' ? '0 1px 2px rgba(0,0,0,.5)' : '0 1px 2px rgba(255,255,255,.2)';
+  if(!game)return;
+  boardEl.innerHTML='';
+  const ranks=orientation==='white'?[8,7,6,5,4,3,2,1]:[1,2,3,4,5,6,7,8];
+  const files=orientation==='white'?['a','b','c','d','e','f','g','h']:['h','g','f','e','d','c','b','a'];
+  for(const rank of ranks){
+    for(const file of files){
+      const sq=file+rank;
+      const isLight=(files.indexOf(file)+ranks.indexOf(rank))%2===0;
+      const piece=game.get(sq);
+      const div=document.createElement('div');
+      div.className='sq '+(isLight?'light':'dark');
+      div.dataset.square=sq;
+      if(piece){
+        div.textContent=PIECES[piece.color==='w'?piece.type.toUpperCase():piece.type];
+        div.style.color=piece.color==='w'?'#FFFFFF':'#111111';
+        div.style.textShadow=piece.color==='w'?'0 1px 2px rgba(0,0,0,.5)':'0 1px 2px rgba(255,255,255,.2)';
       }
-      if (lastMoveSquares.includes(sq)) div.classList.add('last');
-      if (selectedSquare === sq) div.classList.add('sel');
-      if (selectedSquare) {
-        const legal = game.moves({ square: selectedSquare, verbose: true });
-        if (legal.some(m => m.to === sq)) div.classList.add('legal');
+      if(lastMoveSquares.includes(sq))div.classList.add('last');
+      if(selectedSquare===sq)div.classList.add('sel');
+      if(selectedSquare){
+        const legal=game.moves({square:selectedSquare,verbose:true});
+        if(legal.some(m=>m.to===sq))div.classList.add('legal');
       }
-      div.addEventListener('click', () => handleSquareClick(sq));
+      div.addEventListener('click',()=>handleSquareClick(sq));
       boardEl.appendChild(div);
     }
   }
 }
 
-function handleSquareClick(sq) {
-  if (!game) return;
-  if (game.isGameOver()) { toast('Game over — reset to play', 'info'); return; }
-  const piece = game.get(sq);
-  if (selectedSquare) {
-    const legal = game.moves({ square: selectedSquare, verbose: true });
-    const target = legal.find(m => m.to === sq);
-    if (target) {
-      try {
-        const mv = game.move({ from: selectedSquare, to: sq, promotion: 'q' });
-        toast(`Legal: ${mv.san}`, 'success');
-        selectedSquare = null;
-        lastMoveSquares = [mv.from, mv.to];
-        renderBoard();
-        updateUI(mv);
-        return;
-      } catch (err) {
-        toast('Illegal move', 'danger');
-        selectedSquare = null;
-        renderBoard();
-        return;
-      }
+function handleSquareClick(sq){
+  if(!game)return;
+  if(matchId){toast('Match in progress — moves are automatic','info');return}
+  if(game.isGameOver()){toast('Game over — reset to play','info');return}
+  const piece=game.get(sq);
+  if(selectedSquare){
+    const legal=game.moves({square:selectedSquare,verbose:true});
+    const target=legal.find(m=>m.to===sq);
+    if(target){
+      try{
+        const mv=game.move({from:selectedSquare,to:sq,promotion:'q'});
+        toast(`Legal: ${mv.san}`,'success');
+        selectedSquare=null;lastMoveSquares=[mv.from,mv.to];
+        renderBoard();updateUI(mv);return;
+      }catch(err){toast('Illegal move','danger');selectedSquare=null;renderBoard();return}
     }
-    if (piece && piece.color === game.turn()) {
-      selectedSquare = sq;
-      renderBoard();
-      return;
-    }
-    selectedSquare = null;
-    renderBoard();
-    return;
+    if(piece&&piece.color===game.turn()){selectedSquare=sq;renderBoard();return}
+    selectedSquare=null;renderBoard();return;
   }
-  if (piece && piece.color === game.turn()) {
-    selectedSquare = sq;
-    renderBoard();
-  } else if (piece) {
-    toast('Not your turn', 'danger');
-  }
+  if(piece&&piece.color===game.turn()){selectedSquare=sq;renderBoard()}
+  else if(piece){toast('Not your turn','danger')}
 }
 
 function renderLog(){
-  if (!game) return;
+  if(!game)return;
   const log=document.getElementById('moveLog');
   const h=game.history({verbose:true});
   if(!h.length){log.innerHTML='<p class="text-gray-500 italic">No moves yet</p>';return}
@@ -241,7 +253,7 @@ function renderLog(){
 }
 
 function updateUI(lm=null){
-  if (!game) return;
+  if(!game)return;
   document.getElementById('turnDisplay').textContent=game.turn()==='w'?'WHITE':'BLACK';
   document.getElementById('moveCount').textContent=game.history().length;
   if(lm)document.getElementById('lastMove').textContent=`${lm.from}-${lm.to} (${lm.san})`;
@@ -253,7 +265,7 @@ function updateUI(lm=null){
   renderLog();
 }
 
-// ============ WALLET ============
+// ============ WALLET (with mobile deeplink) ============
 function detectWallet(){
   if(window.phantom?.solana?.isPhantom)return{p:window.phantom.solana,n:'Phantom'};
   if(window.solflare?.isSolflare)return{p:window.solflare,n:'Solflare'};
@@ -265,7 +277,21 @@ function detectWallet(){
 async function connectWallet(){
   const btn=document.getElementById('connectBtn');
   const d=detectWallet();
-  if(!d){toast('Install Phantom, Solflare, Backpack or Glow','danger');return}
+
+  if(!d){
+    const isMobile=/iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    if(isMobile){
+      // Open this page inside Phantom's in-app browser
+      const url=encodeURIComponent(window.location.href);
+      const ref=encodeURIComponent(window.location.origin);
+      toast('Opening in Phantom…','info');
+      setTimeout(()=>{window.location.href=`https://phantom.app/ul/browse/${url}?ref=${ref}`},500);
+      return;
+    }
+    toast('Install Phantom, Solflare, Backpack or Glow','danger');
+    return;
+  }
+
   btn.disabled=true;btn.textContent='Connecting…';
   try{
     const r=await d.p.connect();
@@ -307,7 +333,7 @@ async function setEmail(){
 
 function buyTokens(){
   if(!userEmail){toast('Set your email first','danger');return}
-  if(typeof PaystackPop === 'undefined'){toast('Paystack not loaded','danger');return}
+  if(typeof PaystackPop==='undefined'){toast('Paystack not loaded','danger');return}
   const h=PaystackPop.setup({
     key:CONFIG.PAYSTACK_PUBLIC_KEY,email:userEmail,
     amount:CONFIG.KES_PER_TOKEN*100,currency:'KES',
@@ -327,7 +353,7 @@ async function handlePaySuccess(ref){
   toast('+1 $WAVEUNITS','success');
 }
 
-// ============ AGENT ============
+// ============ AGENT CREATOR ============
 function createAgent(){
   const name=document.getElementById('agentName').value.trim();
   const provider=document.getElementById('llmProvider').value;
@@ -342,126 +368,259 @@ function createAgent(){
   toast(`Agent "${name}" created`,'success');
 }
 
-async function askLLM() {
-  if (!game) return null;
-  const legal = game.moves({ verbose: true });
-  if (legal.length === 0) return null;
-  const legalStr = legal.map(m => `${m.from}-${m.to}${m.promotion ? '=' + m.promotion : ''}`).join(', ');
-  const turn = game.turn() === 'w' ? 'White' : 'Black';
-  const prompt = `You are a chess AI. Strategy: "${agent.strategy}"
-Board (FEN): ${game.fen()}
+// ============ LLM ============
+async function askLLM(fen, legalMoves){
+  const legalStr=legalMoves.map(m=>`${m.from}-${m.to}${m.promotion?'='+m.promotion:''}`).join(', ');
+  const turn=fen.split(' ')[1]==='w'?'White':'Black';
+  const prompt=`You are a chess AI. Strategy: "${agent.strategy}"
+Board (FEN): ${fen}
 Turn: ${turn}
 Legal moves: ${legalStr}
 Reply with ONLY the move like "e2-e4". No other text.`;
-
-  const endpoint = agent.provider === 'openrouter'
-    ? 'https://openrouter.ai/api/v1/chat/completions'
-    : 'https://api.openai.com/v1/chat/completions';
-  const model = agent.provider === 'openrouter' ? 'openai/gpt-4o-mini' : 'gpt-4o-mini';
-
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${agent.apiKey}` },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], max_tokens: 20, temperature: 0.7 })
+  const endpoint=agent.provider==='openrouter'?'https://openrouter.ai/api/v1/chat/completions':'https://api.openai.com/v1/chat/completions';
+  const model=agent.provider==='openrouter'?'openai/gpt-4o-mini':'gpt-4o-mini';
+  const res=await fetch(endpoint,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':`Bearer ${agent.apiKey}`},
+    body:JSON.stringify({model,messages:[{role:'user',content:prompt}],max_tokens:20,temperature:0.7})
   });
-  if (!res.ok) throw new Error(`LLM ${res.status}: ${(await res.text()).slice(0,80)}`);
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content?.trim() || '';
-  const match = text.match(/([a-h][1-8])-([a-h][1-8])(?:=([qrbn]))?/i);
-  if (!match) throw new Error(`No move in: "${text.slice(0,40)}"`);
-  return `${match[1]}-${match[2]}${match[3] ? '=' + match[3].toLowerCase() : ''}`;
+  if(!res.ok)throw new Error(`LLM ${res.status}`);
+  const data=await res.json();
+  const text=data.choices?.[0]?.message?.content?.trim()||'';
+  const match=text.match(/([a-h][1-8])-([a-h][1-8])(?:=([qrbn]))?/i);
+  if(!match)throw new Error(`No move in: "${text.slice(0,40)}"`);
+  return `${match[1]}-${match[2]}${match[3]?'='+match[3].toLowerCase():''}`;
 }
 
-function tryMove(moveStr) {
-  if (!game) return null;
-  const [from, rest] = moveStr.split('-');
-  const [to, promo] = rest.includes('=') ? rest.split('=') : [rest, undefined];
-  try { return game.move({ from, to, promotion: promo || 'q' }); }
-  catch { return null; }
+function tryMoveOnGame(g, moveStr){
+  const [from,rest]=moveStr.split('-');
+  const [to,promo]=rest.includes('=')?rest.split('='):[rest,undefined];
+  try{return g.move({from,to,promotion:promo||'q'})}
+  catch{return null}
 }
 
-async function agentMove() {
-  if (!agent.ready) { toast('Create agent first','danger'); return; }
-  if (!game) { toast('Board not ready','danger'); return; }
-  if (game.isGameOver()) { toast('Game over','info'); return; }
-  const thinkEl = document.getElementById('agentThink');
+// ============ SOLO PLAY ============
+async function agentMove(){
+  if(!agent.ready){toast('Create agent first','danger');return}
+  if(!game){toast('Board not ready','danger');return}
+  if(matchId){toast('Use matchmaking for matches','info');return}
+  if(game.isGameOver()){toast('Game over','info');return}
+  const thinkEl=document.getElementById('agentThink');
   thinkEl.classList.remove('hidden');
-  try {
-    let moveStr = await askLLM();
-    let result = tryMove(moveStr);
-    if (!result) {
-      toast(`Illegal ${moveStr} — retry`, 'danger');
-      moveStr = await askLLM();
-      result = tryMove(moveStr);
-      if (!result) throw new Error(`Still illegal: ${moveStr}`);
+  try{
+    const legal=game.moves({verbose:true});
+    let moveStr=await askLLM(game.fen(), legal);
+    let result=tryMoveOnGame(game, moveStr);
+    if(!result){
+      toast(`Illegal ${moveStr} — retry`,'danger');
+      moveStr=await askLLM(game.fen(), legal);
+      result=tryMoveOnGame(game, moveStr);
+      if(!result)throw new Error(`Still illegal: ${moveStr}`);
     }
-    lastMoveSquares = [result.from, result.to];
-    selectedSquare = null;
-    renderBoard();
-    updateUI(result);
-    toast(`Agent: ${result.san}`, 'success');
-  } catch (err) {
+    lastMoveSquares=[result.from,result.to];selectedSquare=null;
+    renderBoard();updateUI(result);
+    toast(`Agent: ${result.san}`,'success');
+  }catch(err){
     console.error(err);
-    toast(`Agent: ${err.message.slice(0,80)}`, 'danger');
-  } finally {
+    toast(`Agent: ${err.message.slice(0,80)}`,'danger');
+  }finally{
     thinkEl.classList.add('hidden');
   }
 }
 
-// ============ BINDINGS ============
-document.getElementById('connectBtn').onclick = connectWallet;
-document.getElementById('connectEmailBtn').onclick = setEmail;
-document.getElementById('buyBtn').onclick = buyTokens;
-document.getElementById('createAgentBtn').onclick = createAgent;
-document.getElementById('agentMoveBtn').onclick = agentMove;
-document.getElementById('agentAutoBtn').onclick = () => {
-  const btn = document.getElementById('agentAutoBtn');
-  if (agentAutoTimer) {
-    clearInterval(agentAutoTimer);
-    agentAutoTimer = null;
-    btn.textContent = 'Auto: OFF';
-    btn.className = 'py-3 rounded-xl font-bold text-xs bg-white/5 border border-white/10 hover:bg-white/10 transition';
+// ============ MATCHMAKING ============
+async function findMatch(){
+  if(!agent.ready){toast('Create agent first','danger');return}
+  if(!game)return;
+
+  document.getElementById('matchIdle').classList.add('hidden');
+  document.getElementById('matchSearching').classList.remove('hidden');
+
+  // Reset the board for a new match
+  game.reset();
+  lastMoveSquares=[];
+  selectedSquare=null;
+  renderBoard();
+  updateUI();
+
+  // Check if there's already a waiting player
+  const queue=await fbGet('queue');
+  let opponent=null;
+  if(queue){
+    for(const [pid, info] of Object.entries(queue)){
+      if(pid!==myPlayerId && info && info.name){
+        opponent={pid, ...info};
+        break;
+      }
+    }
+  }
+
+  if(opponent){
+    // Join as player 2 (black)
+    matchId='match_'+Date.now();
+    myColor='b';
+    await fbSet('matches/'+matchId,{
+      status:'active',
+      white:{pid:opponent.pid, name:opponent.name},
+      black:{pid:myPlayerId, name:agent.name},
+      moves:[],
+      fen:new window.Chess().fen(),
+      createdAt:Date.now()
+    });
+    await fbDelete('queue/'+opponent.pid);
+    toast(`Matched vs ${opponent.name}! You play black.`,'success');
+    startPollingMatch();
   } else {
-    if (!agent.ready) { toast('Create agent first','danger'); return; }
-    agentAutoTimer = setInterval(agentMove, 4000);
-    btn.textContent = 'Auto: ON';
-    btn.className = 'py-3 rounded-xl font-bold text-xs bg-green-500/20 border border-green-500/40 text-green-300 transition';
+    // Join queue as player 1 (white)
+    await fbSet('queue/'+myPlayerId,{name:agent.name, joinedAt:Date.now()});
+    toast('Searching for opponent…','info');
+    // Poll queue for an opponent to pick us up
+    matchPollTimer=setInterval(async()=>{
+      // Check if we got matched into a game
+      const allMatches=await fbGet('matches');
+      if(allMatches){
+        for(const [mid, m] of Object.entries(allMatches)){
+          if(m.status==='active' && (m.white?.pid===myPlayerId || m.black?.pid===myPlayerId)){
+            matchId=mid;
+            myColor=m.white?.pid===myPlayerId?'w':'b';
+            await fbDelete('queue/'+myPlayerId);
+            clearInterval(matchPollTimer);
+            matchPollTimer=null;
+            toast(`Matched vs ${myColor==='w'?m.black?.name:m.white?.name}! You play ${myColor==='w'?'white':'black'}.`,'success');
+            startPollingMatch();
+            return;
+          }
+        }
+      }
+    }, 3000);
+  }
+}
+
+function startPollingMatch(){
+  document.getElementById('matchSearching').classList.add('hidden');
+  document.getElementById('matchInProgress').classList.remove('hidden');
+  if(matchPollTimer){clearInterval(matchPollTimer);matchPollTimer=null}
+  matchPollTimer=setInterval(pollMatch, CONFIG.MATCH_POLL_MS);
+  pollMatch();
+}
+
+async function pollMatch(){
+  if(!matchId)return;
+  const m=await fbGet('matches/'+matchId);
+  if(!m)return;
+
+  document.getElementById('matchOpponent').textContent='vs '+(myColor==='w'?m.black?.name:m.white?.name);
+
+  // Sync board to server state
+  const serverGame=new window.Chess(m.fen);
+  const moves=m.moves||[];
+  if(moves.length!==lastSeenMoveCount){
+    game=new window.Chess(m.fen);
+    lastMoveSquares=[];
+    const last=moves[moves.length-1];
+    if(last)lastMoveSquares=[last.from,last.to];
+    lastSeenMoveCount=moves.length;
+    renderBoard();
+    updateUI(last?{from:last.from,to:last.to,san:last.san}:null);
+  }
+
+  // Check if game over
+  if(game.isGameOver()){
+    document.getElementById('matchStatus').textContent='Game over';
+    clearInterval(matchPollTimer);matchPollTimer=null;
+    return;
+  }
+
+  // Is it my turn?
+  const isMyTurn=(myColor==='w'&&game.turn()==='w')||(myColor==='b'&&game.turn()==='b');
+  if(isMyTurn && agent.ready){
+    document.getElementById('matchStatus').textContent='Your agent is thinking…';
+    try{
+      const legal=game.moves({verbose:true});
+      let moveStr=await askLLM(game.fen(), legal);
+      let result=tryMoveOnGame(game, moveStr);
+      if(!result){
+        moveStr=await askLLM(game.fen(), legal);
+        result=tryMoveOnGame(game, moveStr);
+      }
+      if(result){
+        // Push move to Firebase
+        const newMoves=[...moves,{from:result.from,to:result.to,san:result.san,by:myColor,ts:Date.now()}];
+        await fbSet('matches/'+matchId+'/moves',newMoves);
+        await fbSet('matches/'+matchId+'/fen',game.fen());
+        lastSeenMoveCount=newMoves.length;
+        lastMoveSquares=[result.from,result.to];
+        renderBoard();
+        updateUI(result);
+        toast(`You: ${result.san}`,'success');
+      }
+    }catch(err){
+      toast(`Agent error: ${err.message.slice(0,60)}`,'danger');
+    }
+  } else {
+    document.getElementById('matchStatus').textContent='Waiting for opponent…';
+  }
+}
+
+async function cancelMatch(){
+  if(matchPollTimer){clearInterval(matchPollTimer);matchPollTimer=null}
+  await fbDelete('queue/'+myPlayerId);
+  matchId=null;myColor=null;lastSeenMoveCount=0;
+  document.getElementById('matchSearching').classList.add('hidden');
+  document.getElementById('matchInProgress').classList.add('hidden');
+  document.getElementById('matchIdle').classList.remove('hidden');
+  toast('Match cancelled','info');
+}
+
+// ============ BINDINGS ============
+document.getElementById('connectBtn').onclick=connectWallet;
+document.getElementById('connectEmailBtn').onclick=setEmail;
+document.getElementById('buyBtn').onclick=buyTokens;
+document.getElementById('createAgentBtn').onclick=createAgent;
+document.getElementById('agentMoveBtn').onclick=agentMove;
+document.getElementById('agentAutoBtn').onclick=()=>{
+  const btn=document.getElementById('agentAutoBtn');
+  if(agentAutoTimer){
+    clearInterval(agentAutoTimer);agentAutoTimer=null;
+    btn.textContent='Auto: OFF';
+    btn.className='py-3 rounded-xl font-bold text-xs bg-white/5 border border-white/10 hover:bg-white/10 transition';
+  }else{
+    if(!agent.ready){toast('Create agent first','danger');return}
+    agentAutoTimer=setInterval(agentMove,4000);
+    btn.textContent='Auto: ON';
+    btn.className='py-3 rounded-xl font-bold text-xs bg-green-500/20 border border-green-500/40 text-green-300 transition';
   }
 };
-document.getElementById('resetBtn').onclick = () => {
-  if (!game) return;
-  game.reset();
-  selectedSquare = null;
-  lastMoveSquares = [];
-  if (agentAutoTimer) { clearInterval(agentAutoTimer); agentAutoTimer = null; document.getElementById('agentAutoBtn').textContent = 'Auto: OFF'; }
+document.getElementById('findMatchBtn').onclick=findMatch;
+document.getElementById('cancelMatchBtn').onclick=cancelMatch;
+document.getElementById('resetBtn').onclick=()=>{
+  if(!game)return;
+  game.reset();selectedSquare=null;lastMoveSquares=[];
+  if(agentAutoTimer){clearInterval(agentAutoTimer);agentAutoTimer=null;document.getElementById('agentAutoBtn').textContent='Auto: OFF'}
   renderBoard();
-  document.getElementById('lastMove').textContent = '—';
+  document.getElementById('lastMove').textContent='—';
   updateUI();
   toast('Reset','info');
 };
-document.getElementById('flipBtn').onclick = () => {
-  orientation = orientation === 'white' ? 'black' : 'white';
+document.getElementById('flipBtn').onclick=()=>{
+  orientation=orientation==='white'?'black':'white';
   renderBoard();
   toast('Flipped','info');
 };
-document.getElementById('copyFenBtn').onclick = async () => {
-  if (!game) return;
-  try { await navigator.clipboard.writeText(game.fen()); toast('FEN copied','success'); }
-  catch { toast('Copy failed','danger'); }
+document.getElementById('copyFenBtn').onclick=async()=>{
+  if(!game)return;
+  try{await navigator.clipboard.writeText(game.fen());toast('FEN copied','success')}
+  catch{toast('Copy failed','danger')}
 };
 
-// ============ INIT (wait for Chess to load) ============
-function initBoard() {
-  game = new window.Chess();
+// ============ INIT ============
+function initBoard(){
+  game=new window.Chess();
   renderBoard();
   updateUI();
 }
-
-if (window.Chess) {
-  initBoard();
-} else {
-  window.addEventListener('chess-ready', initBoard);
-}
+if(window.Chess){initBoard()}
+else{window.addEventListener('chess-ready',initBoard)}
 </script>
 </body>
 </html>
